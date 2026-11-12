@@ -5,6 +5,7 @@ import android.app.ActivityTaskManager;
 import android.app.TaskInfo;
 import android.app.WindowConfiguration;
 import android.content.Context;
+import android.database.ContentObserver;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.inputmethodservice.InputMethodService;
@@ -12,6 +13,7 @@ import android.os.Handler;
 import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Choreographer;
@@ -38,7 +40,6 @@ import com.android.systemui.shared.system.TaskStackChangeListener;
 import com.android.systemui.shared.system.TaskStackChangeListeners;
 import com.android.systemui.shared.system.smartspace.SmartspaceState;
 import com.android.systemui.statusbar.CommandQueue;
-import com.android.systemui.tuner.TunerService;
 import com.android.wm.shell.shared.FocusTransitionListener;
 import com.android.wm.shell.shared.ShellTransitions;
 
@@ -50,8 +51,6 @@ import java.util.function.BiConsumer;
 import javax.inject.Inject;
 
 import dagger.Lazy;
-
-import lineageos.providers.LineageSettings;
 
 /**
  * Double tap to sleep for the Pixel Launcher home screen.
@@ -66,13 +65,13 @@ import lineageos.providers.LineageSettings;
  * and not tasks, are ignored too.
  */
 @SysUISingleton
-public final class DoubleTapToSleepController implements CoreStartable, TunerService.Tunable {
+public final class DoubleTapToSleepController implements CoreStartable {
 
     private static final String TAG = "DT2SController";
     private static final String LAUNCHER_PKG = "com.google.android.apps.nexuslauncher";
     private static final String MONITOR_NAME = "dt2s-monitor";
     private static final String DOUBLE_TAP_SLEEP_GESTURE =
-            "lineagesystem:" + LineageSettings.System.DOUBLE_TAP_SLEEP_GESTURE;
+            Settings.System.DOUBLE_TAP_SLEEP_GESTURE;
 
     // Regions of the home screen where a double tap is ignored: status bar + At a Glance at the
     // top, search bar + dock at the bottom. Capped as a fraction of the screen for landscape.
@@ -88,7 +87,7 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
     // The tap that completes a double tap on an app icon also opens the app. Sleep waits for that
     // task change, which stops monitoring and cancels it; in a bug report it came 67 ms after
     // the tap.
-    private static final long SLEEP_DELAY_MS = 300;
+    private static final long SLEEP_DELAY_MS = 150;
 
     private final Context mContext;
     private final PowerManager mPowerManager;
@@ -96,7 +95,6 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
     private final Handler mMainHandler;
     private final Executor mBackgroundExecutor;
     private final CommandQueue mCommandQueue;
-    private final TunerService mTunerService;
     private final ShellTransitions mShellTransitions;
     private final LauncherProxyService mLauncherProxyService;
     private final Lazy<KeyguardUnlockAnimationController> mKeyguardUnlockAnimationController;
@@ -104,6 +102,13 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
 
     private InputMonitorCompat mInputMonitorCompat;
     private InputChannelCompat.InputEventReceiver mInputEventReceiver;
+
+    private final ContentObserver mDoubleTapToSleepObserver = new ContentObserver(null) {
+        @Override
+        public void onChange(boolean selfChange) {
+            updateEnabledFromSetting();
+        }
+    };
 
     private GestureDetector mGestureDetector;
 
@@ -137,7 +142,6 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
             CommandQueue commandQueue,
             @Main Handler mainHandler,
             @Background Executor backgroundExecutor,
-            TunerService tunerService,
             ShellTransitions shellTransitions,
             LauncherProxyService launcherProxyService,
             Lazy<KeyguardUnlockAnimationController> keyguardUnlockAnimationController,
@@ -148,7 +152,6 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
         mCommandQueue = commandQueue;
         mMainHandler = mainHandler;
         mBackgroundExecutor = backgroundExecutor;
-        mTunerService = tunerService;
         mShellTransitions = shellTransitions;
         mLauncherProxyService = launcherProxyService;
         mKeyguardUnlockAnimationController = keyguardUnlockAnimationController;
@@ -157,7 +160,10 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
 
     @Override
     public void start() {
-        mTunerService.addTunable(this, DOUBLE_TAP_SLEEP_GESTURE);
+        mContext.getContentResolver().registerContentObserver(
+                Settings.System.getUriFor(DOUBLE_TAP_SLEEP_GESTURE),
+                false, mDoubleTapToSleepObserver);
+        updateEnabledFromSetting();
 
         TaskStackChangeListeners.getInstance().registerTaskStackListener(
                 new TaskStackChangeListener() {
@@ -278,12 +284,12 @@ public final class DoubleTapToSleepController implements CoreStartable, TunerSer
         });
     }
 
-    @Override
-    public void onTuningChanged(String key, String newValue) {
-        if (!DOUBLE_TAP_SLEEP_GESTURE.equals(key)) return;
-        final boolean enabled = TunerService.parseIntegerSwitch(newValue,
+    private void updateEnabledFromSetting() {
+        final boolean enabled = Settings.System.getInt(mContext.getContentResolver(),
+                DOUBLE_TAP_SLEEP_GESTURE,
                 mContext.getResources().getBoolean(
-                        org.lineageos.platform.internal.R.bool.config_dt2sGestureEnabledByDefault));
+                        com.android.internal.R.bool.config_dt2sGestureEnabledByDefault)
+                                ? 1 : 0) != 0;
         mMainHandler.post(() -> {
             if (mEnabled.getAndSet(enabled) == enabled) return;
             Log.d(TAG, "DT2S " + (enabled ? "enabled" : "disabled"));
